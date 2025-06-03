@@ -147,7 +147,7 @@ OPENAI_API_KEY=your_openai_api_key
 OPENROUTER_API_KEY=your_openrouter_api_key
 
 # Model Configuration
-MODEL_CHOICE=openai/gpt-4o-mini  # OpenRouter model for chat completions
+MODEL_CHOICE=openai/gpt-4.1-nano  # OpenRouter model for chat completions
 EMBEDDING_MODEL=text-embedding-3-small  # OpenAI model for embeddings
 
 # RAG Strategies (set to "true" or "false", default to "false")
