@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="./public/logo.svg" alt="CCAdvance Logo" width="120" height="120">
+  <img src="./public/Logo.svg" alt="CCAdvance Logo" width="120" height="120">
   
   # CCAdvance
   
