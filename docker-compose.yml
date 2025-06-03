@@ -1,0 +1,24 @@
+services:
+  ccadvance:
+    image: ghcr.io/vincenthopf/ccadvance:latest
+    container_name: ccadvance
+
+    ports:
+      - "${PORT:-8051}:${PORT:-8051}"
+
+    environment:
+      - TRANSPORT=${TRANSPORT:-sse}
+      - HOST=${HOST:-0.0.0.0}
+      - PORT=${PORT:-8051}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-3-small}
+      - MODEL_CHOICE=${MODEL_CHOICE:-openai/gpt-4.1-nano}
+      - USE_CONTEXTUAL_EMBEDDINGS=${USE_CONTEXTUAL_EMBEDDINGS:-false}
+      - USE_HYBRID_SEARCH=${USE_HYBRID_SEARCH:-false}
+      - USE_AGENTIC_RAG=${USE_AGENTIC_RAG:-false}
+      - USE_RERANKING=${USE_RERANKING:-false}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+
+    restart: unless-stopped
