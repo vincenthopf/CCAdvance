@@ -11,8 +11,64 @@ import openai
 import re
 import time
 
-# Load OpenAI API key for embeddings
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# Configure dual client setup: OpenAI for embeddings, OpenRouter for chat
+from openai import OpenAI
+
+# OpenAI client for embeddings (cheaper and more reliable)
+_openai_client = None
+
+# OpenRouter client for chat completions (more models, better rates)
+_openrouter_client = None
+
+def get_openai_client() -> OpenAI:
+    """Get or create the OpenAI client for embeddings."""
+    global _openai_client
+    
+    if _openai_client is None:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            print("Warning: OPENAI_API_KEY not set. Embedding features will be disabled.")
+            return None
+        
+        _openai_client = OpenAI(api_key=api_key)
+    
+    return _openai_client
+
+def get_openrouter_client() -> OpenAI:
+    """Get or create the OpenRouter client for chat completions."""
+    global _openrouter_client
+    
+    if _openrouter_client is None:
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            print("Warning: OPENROUTER_API_KEY not set. AI chat features will be disabled.")
+            return None
+        
+        # OpenRouter recommended headers
+        _openrouter_client = OpenAI(
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+            default_headers={
+                "HTTP-Referer": "https://github.com/your-repo/mcp-crawl4ai-rag",
+                "X-Title": "MCP Crawl4AI RAG Server"
+            }
+        )
+    
+    return _openrouter_client
+    
+# Default models
+DEFAULT_MODEL = "openai/gpt-4o-mini"  # OpenRouter model
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"  # OpenAI model
+
+def get_model_choice() -> str:
+    """Get the model choice from environment variables with fallback."""
+    model = os.getenv("MODEL_CHOICE", DEFAULT_MODEL)
+    return model
+
+def get_embedding_model() -> str:
+    """Get the embedding model choice from environment variables with fallback."""
+    model = os.getenv("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+    return model
 
 def get_supabase_client() -> Client:
     """
@@ -47,8 +103,12 @@ def create_embeddings_batch(texts: List[str]) -> List[List[float]]:
     
     for retry in range(max_retries):
         try:
-            response = openai.embeddings.create(
-                model="text-embedding-3-small", # Hardcoding embedding model for now, will change this later to be more dynamic
+            client = get_openai_client()
+            if not client:
+                return [[0.0] * 1536] * len(texts)  # Return zero embeddings if no client
+            
+            response = client.embeddings.create(
+                model=get_embedding_model(),
                 input=texts
             )
             return [item.embedding for item in response.data]
@@ -67,8 +127,13 @@ def create_embeddings_batch(texts: List[str]) -> List[List[float]]:
                 
                 for i, text in enumerate(texts):
                     try:
-                        individual_response = openai.embeddings.create(
-                            model="text-embedding-3-small",
+                        client = get_openai_client()
+                        if not client:
+                            embeddings.append([0.0] * 1536)
+                            continue
+                            
+                        individual_response = client.embeddings.create(
+                            model=get_embedding_model(),
                             input=[text]
                         )
                         embeddings.append(individual_response.data[0].embedding)
@@ -102,6 +167,7 @@ def create_embedding(text: str) -> List[float]:
 def generate_contextual_embedding(full_document: str, chunk: str) -> Tuple[str, bool]:
     """
     Generate contextual information for a chunk within a document to improve retrieval.
+    Will retry with exponential backoff on rate limits and never fail completely.
     
     Args:
         full_document: The complete document text
@@ -112,11 +178,16 @@ def generate_contextual_embedding(full_document: str, chunk: str) -> Tuple[str, 
         - The contextual text that situates the chunk within the document
         - Boolean indicating if contextual embedding was performed
     """
-    model_choice = os.getenv("MODEL_CHOICE")
+    model_choice = get_model_choice()
+    client = get_openrouter_client()
+    if not client:
+        print(f"OpenRouter client not available for contextual embeddings. Check OPENROUTER_API_KEY.")
+        return chunk, False
     
-    try:
-        # Create the prompt for generating contextual information
-        prompt = f"""<document> 
+    print(f"Generating contextual embedding using model: {model_choice}")
+    
+    # Create the prompt for generating contextual information
+    prompt = f"""<document> 
 {full_document[:25000]} 
 </document>
 Here is the chunk we want to situate within the whole document 
@@ -125,28 +196,51 @@ Here is the chunk we want to situate within the whole document
 </chunk> 
 Please give a short succinct context to situate this chunk within the overall document for the purposes of improving search retrieval of the chunk. Answer only with the succinct context and nothing else."""
 
-        # Call the OpenAI API to generate contextual information
-        response = openai.chat.completions.create(
-            model=model_choice,
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant that provides concise contextual information."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=200
-        )
-        
-        # Extract the generated context
-        context = response.choices[0].message.content.strip()
-        
-        # Combine the context with the original chunk
-        contextual_text = f"{context}\n---\n{chunk}"
-        
-        return contextual_text, True
+    # Implement aggressive exponential backoff - never give up on rate limits
+    max_retries = 10  # Increased retries
+    base_delay = 2.0  # Longer base delay
+    max_delay = 300.0  # Cap at 5 minutes
     
-    except Exception as e:
-        print(f"Error generating contextual embedding: {e}. Using original chunk instead.")
-        return chunk, False
+    for attempt in range(max_retries):
+        try:
+            # Call the OpenRouter API to generate contextual information
+            # Client was already checked above
+                
+            response = client.chat.completions.create(
+                model=model_choice,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that provides concise contextual information."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=200
+            )
+            
+            # Extract the generated context
+            context = response.choices[0].message.content.strip()
+            
+            # Combine the context with the original chunk
+            contextual_text = f"{context}\n---\n{chunk}"
+            
+            return contextual_text, True
+        
+        except Exception as e:
+            if "429" in str(e) or "rate" in str(e).lower():
+                if attempt < max_retries - 1:
+                    # Calculate delay with exponential backoff and jitter, capped at max_delay
+                    delay = min(base_delay * (2 ** attempt) + (time.time() % 1), max_delay)
+                    print(f"Rate limit hit generating contextual embedding, waiting {delay:.2f} seconds (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"Rate limit persisted after {max_retries} attempts for contextual embedding, using original chunk")
+                    return chunk, False
+            else:
+                print(f"Error generating contextual embedding (model: {model_choice}): {type(e).__name__}: {e}")
+                print(f"Full error details: {str(e)}")
+                return chunk, False
+    
+    return chunk, False
 
 def process_chunk_with_context(args):
     """
@@ -227,9 +321,9 @@ def add_documents_to_supabase(
                 full_document = url_to_full_document.get(url, "")
                 process_args.append((url, content, full_document))
             
-            # Process in parallel using ThreadPoolExecutor
+            # Process in parallel using ThreadPoolExecutor (reduced workers to avoid rate limits)
             contextual_contents = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
                 # Submit all tasks and collect results
                 future_to_idx = {executor.submit(process_chunk_with_context, arg): idx 
                                 for idx, arg in enumerate(process_args)}
@@ -449,7 +543,7 @@ def generate_code_example_summary(code: str, context_before: str, context_after:
     Returns:
         A summary of what the code example demonstrates
     """
-    model_choice = os.getenv("MODEL_CHOICE")
+    model_choice = get_model_choice()
     
     # Create the prompt
     prompt = f"""<context_before>
@@ -467,22 +561,47 @@ def generate_code_example_summary(code: str, context_before: str, context_after:
 Based on the code example and its surrounding context, provide a concise summary (2-3 sentences) that describes what this code example demonstrates and its purpose. Focus on the practical application and key concepts illustrated.
 """
     
-    try:
-        response = openai.chat.completions.create(
-            model=model_choice,
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant that provides concise code example summaries."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=100
-        )
-        
-        return response.choices[0].message.content.strip()
+    # Implement aggressive exponential backoff - never give up on rate limits
+    max_retries = 10  # Increased retries
+    base_delay = 2.0  # Longer base delay
+    max_delay = 300.0  # Cap at 5 minutes
     
-    except Exception as e:
-        print(f"Error generating code example summary: {e}")
-        return "Code example for demonstration purposes."
+    for attempt in range(max_retries):
+        try:
+            client = get_openrouter_client()
+            if not client:
+                print(f"OpenRouter client not available for code summary. Check OPENROUTER_API_KEY.")
+                return "Code example for demonstration purposes."
+                
+            response = client.chat.completions.create(
+                model=model_choice,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that provides concise code example summaries."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=100
+            )
+            
+            return response.choices[0].message.content.strip()
+        
+        except Exception as e:
+            if "429" in str(e) or "rate" in str(e).lower():
+                if attempt < max_retries - 1:
+                    # Calculate delay with exponential backoff and jitter, capped at max_delay
+                    delay = min(base_delay * (2 ** attempt) + (time.time() % 1), max_delay)
+                    print(f"Rate limit hit generating code summary, waiting {delay:.2f} seconds (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"Rate limit persisted after {max_retries} attempts for code summary, using fallback")
+                    return "Code example for demonstration purposes."
+            else:
+                print(f"Error generating code example summary (model: {model_choice}): {type(e).__name__}: {e}")
+                print(f"Full error details: {str(e)}")
+                return "Code example for demonstration purposes."
+    
+    return "Code example for demonstration purposes."
 
 
 def add_code_examples_to_supabase(
@@ -632,6 +751,7 @@ def extract_source_summary(source_id: str, content: str, max_length: int = 500) 
     Extract a summary for a source from its content using an LLM.
     
     This function uses the OpenAI API to generate a concise summary of the source content.
+    Will retry with exponential backoff on rate limits and never fail completely.
     
     Args:
         source_id: The source ID (domain)
@@ -648,7 +768,13 @@ def extract_source_summary(source_id: str, content: str, max_length: int = 500) 
         return default_summary
     
     # Get the model choice from environment variables
-    model_choice = os.getenv("MODEL_CHOICE")
+    model_choice = get_model_choice()
+    client = get_openrouter_client()
+    if not client:
+        print(f"OpenRouter client not available for source summary. Check OPENROUTER_API_KEY.")
+        return default_summary
+    
+    print(f"Generating source summary for {source_id} using model: {model_choice}")
     
     # Limit content length to avoid token limits
     truncated_content = content[:25000] if len(content) > 25000 else content
@@ -661,30 +787,52 @@ def extract_source_summary(source_id: str, content: str, max_length: int = 500) 
 The above content is from the documentation for '{source_id}'. Please provide a concise summary (3-5 sentences) that describes what this library/tool/framework is about. The summary should help understand what the library/tool/framework accomplishes and the purpose.
 """
     
-    try:
-        # Call the OpenAI API to generate the summary
-        response = openai.chat.completions.create(
-            model=model_choice,
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant that provides concise library/tool/framework summaries."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=150
-        )
-        
-        # Extract the generated summary
-        summary = response.choices[0].message.content.strip()
-        
-        # Ensure the summary is not too long
-        if len(summary) > max_length:
-            summary = summary[:max_length] + "..."
-            
-        return summary
+    # Implement aggressive exponential backoff - never give up on rate limits
+    max_retries = 10  # Increased retries
+    base_delay = 2.0  # Longer base delay
+    max_delay = 300.0  # Cap at 5 minutes
     
-    except Exception as e:
-        print(f"Error generating summary with LLM for {source_id}: {e}. Using default summary.")
-        return default_summary
+    for attempt in range(max_retries):
+        try:
+            # Call the OpenRouter API to generate the summary
+            # Client was already checked above
+                
+            response = client.chat.completions.create(
+                model=model_choice,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that provides concise library/tool/framework summaries."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=150
+            )
+            
+            # Extract the generated summary
+            summary = response.choices[0].message.content.strip()
+            
+            # Ensure the summary is not too long
+            if len(summary) > max_length:
+                summary = summary[:max_length] + "..."
+                
+            return summary
+        
+        except Exception as e:
+            if "429" in str(e) or "rate" in str(e).lower():
+                if attempt < max_retries - 1:
+                    # Calculate delay with exponential backoff and jitter, capped at max_delay
+                    delay = min(base_delay * (2 ** attempt) + (time.time() % 1), max_delay)
+                    print(f"Rate limit hit generating summary for {source_id}, waiting {delay:.2f} seconds (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"Rate limit persisted after {max_retries} attempts for {source_id}, using default summary")
+                    return default_summary
+            else:
+                print(f"Error generating summary for {source_id} (model: {model_choice}): {type(e).__name__}: {e}")
+                print(f"Full error details: {str(e)}")
+                return default_summary
+    
+    return default_summary
 
 
 def search_code_examples(
