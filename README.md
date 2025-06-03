@@ -1,3 +1,11 @@
+<div align="center">
+  <img src="./public/logo.svg" alt="CCAdvance Logo" width="120" height="120">
+  
+  # CCAdvance
+  
+  > **Advanced Features for Claude Code**
+</div>
+
 <h1 align="center">Crawl4AI RAG MCP Server</h1>
 
 <p align="center">

@@ -1,0 +1,14 @@
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <!-- Main Icon - Scaled up from favicon design -->
+  
+  <!-- Background -->
+  <rect width="256" height="256" rx="48" fill="#CC785C"/>
+  
+  <!-- Rounded code brackets -->
+  <path d="M 104 128 Q 72 128 72 96 Q 72 64 104 64 M 152 64 Q 184 64 184 96 Q 184 128 152 128" 
+        fill="none" 
+        stroke="#FFFFFF" 
+        stroke-width="24" 
+        stroke-linecap="round"
+        transform="translate(0, 32)"/>
+</svg>
