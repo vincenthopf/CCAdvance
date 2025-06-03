@@ -3,7 +3,7 @@
   
   # CCAdvance
   
-  > **Advanced Features for Claude Code**
+  **Advanced Features for Claude Code**
 </div>
 
 <h1 align="center">Crawl4AI RAG MCP Server</h1>
