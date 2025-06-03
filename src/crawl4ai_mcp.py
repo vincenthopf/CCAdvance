@@ -1019,11 +1019,13 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
     base_path_prefix = None
     if start_urls:
         parsed = urlparse(start_urls[0])
-        # Use the full path as the prefix for filtering
-        base_path_prefix = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-        # Remove trailing slash if present
-        if base_path_prefix.endswith('/'):
-            base_path_prefix = base_path_prefix[:-1]
+        # Get the directory path (remove any file name)
+        path = parsed.path
+        if path and not path.endswith('/'):
+            # If the path doesn't end with /, treat it as a directory
+            path = path + '/'
+        # Use the scheme, netloc, and directory path for filtering
+        base_path_prefix = f"{parsed.scheme}://{parsed.netloc}{path}"
 
     current_urls = set([normalize_url(u) for u in start_urls])
     results_all = []
