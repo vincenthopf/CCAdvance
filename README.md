@@ -19,6 +19,9 @@ The server includes several advanced RAG strategies that can be enabled to enhan
 - **Hybrid Search** combining vector and keyword search
 - **Agentic RAG** for specialized code example extraction
 - **Reranking** for improved result relevance using cross-encoder models
+- **Dual LLM Provider Support** with OpenAI for embeddings and OpenRouter for chat completions
+- **Aggressive Rate Limit Handling** with exponential backoff to ensure reliable operation
+- **Improved Parallel Processing** with optimized worker counts for better stability
 
 See the [Configuration section](#configuration) below for details on how to enable and configure these strategies.
 
@@ -40,10 +43,14 @@ The Crawl4AI RAG MCP server is just the beginning. Here's where we're headed:
 
 - **Smart URL Detection**: Automatically detects and handles different URL types (regular webpages, sitemaps, text files)
 - **Recursive Crawling**: Follows internal links to discover content
-- **Parallel Processing**: Efficiently crawls multiple pages simultaneously
+- **Parallel Processing**: Efficiently crawls multiple pages simultaneously with optimized worker counts
 - **Content Chunking**: Intelligently splits content by headers and size for better processing
 - **Vector Search**: Performs RAG over crawled content, optionally filtering by data source for precision
 - **Source Retrieval**: Retrieve sources available for filtering to guide the RAG process
+- **Dual LLM Provider Support**: Uses OpenAI for cost-effective embeddings and OpenRouter for flexible chat completions
+- **Robust Rate Limit Handling**: Implements aggressive exponential backoff (up to 10 retries) to handle API rate limits
+- **Enhanced Error Recovery**: Never fails completely on rate limits, always returns graceful fallbacks
+- **Flexible Model Configuration**: Easily switch between different models for embeddings and chat completions
 
 ## Tools
 
@@ -66,6 +73,7 @@ The server provides essential web crawling and search tools:
 - [Python 3.12+](https://www.python.org/downloads/) if running the MCP server directly through uv
 - [Supabase](https://supabase.com/) (database for RAG)
 - [OpenAI API key](https://platform.openai.com/api-keys) (for generating embeddings)
+- [OpenRouter API key](https://openrouter.ai/keys) (optional, for chat completions with more model options)
 
 ## Installation
 
@@ -132,11 +140,15 @@ HOST=0.0.0.0
 PORT=8051
 TRANSPORT=sse
 
-# OpenAI API Configuration
+# OpenAI API Configuration (for embeddings)
 OPENAI_API_KEY=your_openai_api_key
 
-# LLM for summaries and contextual embeddings
-MODEL_CHOICE=gpt-4.1-nano
+# OpenRouter API Configuration (optional, for chat completions)
+OPENROUTER_API_KEY=your_openrouter_api_key
+
+# Model Configuration
+MODEL_CHOICE=openai/gpt-4o-mini  # OpenRouter model for chat completions
+EMBEDDING_MODEL=text-embedding-3-small  # OpenAI model for embeddings
 
 # RAG Strategies (set to "true" or "false", default to "false")
 USE_CONTEXTUAL_EMBEDDINGS=false
@@ -149,16 +161,37 @@ SUPABASE_URL=your_supabase_project_url
 SUPABASE_SERVICE_KEY=your_supabase_service_key
 ```
 
+### New Features in Latest Update
+
+#### **Dual LLM Provider Support**
+The server now supports using different LLM providers for different tasks:
+- **OpenAI** for embeddings: More cost-effective and reliable for embedding generation
+- **OpenRouter** for chat completions: Access to a wider variety of models with better pricing
+
+This separation allows you to optimize costs while maintaining flexibility in model selection.
+
+#### **Enhanced Rate Limit Handling**
+- Implements aggressive exponential backoff with up to 10 retry attempts
+- Base delay of 2 seconds with exponential increase up to 5 minutes
+- Never fails completely - always returns graceful fallbacks
+- Includes jitter to prevent thundering herd problems
+
+#### **Optimized Parallel Processing**
+- Reduced concurrent workers from 10 to 3 to avoid rate limits
+- Better stability when processing large documentation sites
+- Maintains performance while preventing API throttling
+
 ### RAG Strategy Options
 
 The Crawl4AI RAG MCP server supports four powerful RAG strategies that can be enabled independently:
 
 #### 1. **USE_CONTEXTUAL_EMBEDDINGS**
-When enabled, this strategy enhances each chunk's embedding with additional context from the entire document. The system passes both the full document and the specific chunk to an LLM (configured via `MODEL_CHOICE`) to generate enriched context that gets embedded alongside the chunk content.
+When enabled, this strategy enhances each chunk's embedding with additional context from the entire document. The system passes both the full document and the specific chunk to an LLM (configured via `MODEL_CHOICE`) to generate enriched context that gets embedded alongside the chunk content. Now with robust rate limit handling to ensure reliable operation.
 
 - **When to use**: Enable this when you need high-precision retrieval where context matters, such as technical documentation where terms might have different meanings in different sections.
 - **Trade-offs**: Slower indexing due to LLM calls for each chunk, but significantly better retrieval accuracy.
-- **Cost**: Additional LLM API calls during indexing.
+- **Cost**: Additional LLM API calls during indexing (uses OpenRouter if configured).
+- **Enhancement**: Now includes aggressive retry logic to handle rate limits gracefully.
 
 #### 2. **USE_HYBRID_SEARCH**
 Combines traditional keyword search with semantic vector search to provide more comprehensive results. The system performs both searches in parallel and intelligently merges results, prioritizing documents that appear in both result sets.
@@ -168,12 +201,13 @@ Combines traditional keyword search with semantic vector search to provide more 
 - **Cost**: No additional API costs, just computational overhead.
 
 #### 3. **USE_AGENTIC_RAG**
-Enables specialized code example extraction and storage. When crawling documentation, the system identifies code blocks (≥300 characters), extracts them with surrounding context, generates summaries, and stores them in a separate vector database table specifically designed for code search.
+Enables specialized code example extraction and storage. When crawling documentation, the system identifies code blocks (≥300 characters), extracts them with surrounding context, generates summaries, and stores them in a separate vector database table specifically designed for code search. Enhanced with robust rate limit handling.
 
 - **When to use**: Essential for AI coding assistants that need to find specific code examples, implementation patterns, or usage examples from documentation.
 - **Trade-offs**: Significantly slower crawling due to code extraction and summarization, requires more storage space.
-- **Cost**: Additional LLM API calls for summarizing each code example.
+- **Cost**: Additional LLM API calls for summarizing each code example (uses OpenRouter if configured).
 - **Benefits**: Provides a dedicated `search_code_examples` tool that AI agents can use to find specific code implementations.
+- **Enhancement**: Parallel processing optimized to 3 workers to avoid rate limits while maintaining performance.
 
 #### 4. **USE_RERANKING**
 Applies cross-encoder reranking to search results after initial retrieval. Uses a lightweight cross-encoder model (`cross-encoder/ms-marco-MiniLM-L-6-v2`) to score each result against the original query, then reorders results by relevance.
