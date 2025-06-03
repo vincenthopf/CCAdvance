@@ -44,6 +44,10 @@ The Crawl4AI RAG MCP server is just the beginning. Here's where we're headed:
 ## Features
 
 - **Smart URL Detection**: Automatically detects and handles different URL types (regular webpages, sitemaps, text files)
+- **Enhanced JavaScript Support**: Executes JavaScript for dynamic content loading with customizable wait conditions
+- **Documentation Site Optimization**: Specialized handling for JavaScript-heavy documentation sites with navigation extraction
+- **Lazy Loading Support**: Automatically scrolls pages to trigger lazy-loaded content and images
+- **Session Management**: Maintains browser sessions for efficient multi-page crawling on JS-heavy sites
 - **Recursive Crawling**: Follows internal links to discover content
 - **Parallel Processing**: Efficiently crawls multiple pages simultaneously with optimized worker counts
 - **Content Chunking**: Intelligently splits content by headers and size for better processing
@@ -61,13 +65,26 @@ The server provides essential web crawling and search tools:
 ### Core Tools (Always Available)
 
 1. **`crawl_single_page`**: Quickly crawl a single web page and store its content in the vector database
+   - Now with enhanced JavaScript support for dynamic content
+   - Automatically handles lazy-loaded images and expandable sections
+   
 2. **`smart_crawl_url`**: Intelligently crawl a full website based on the type of URL provided (sitemap, llms-full.txt, or a regular webpage that needs to be crawled recursively)
-3. **`get_available_sources`**: Get a list of all available sources (domains) in the database
-4. **`perform_rag_query`**: Search for relevant content using semantic search with optional source filtering
+   - Enhanced with JavaScript execution for documentation sites
+   - Maintains session state for better performance on JS-heavy sites
+   
+3. **`crawl_documentation_site`**: Specialized tool for crawling JavaScript-heavy documentation sites
+   - Handles dynamic navigation and content loading
+   - Extracts and follows documentation navigation links
+   - Maintains browser session for efficient multi-page crawling
+   - Perfect for sites like Apple Developer Documentation, React docs, etc.
+   
+4. **`get_available_sources`**: Get a list of all available sources (domains) in the database
+
+5. **`perform_rag_query`**: Search for relevant content using semantic search with optional source filtering
 
 ### Conditional Tools
 
-5. **`search_code_examples`** (requires `USE_AGENTIC_RAG=true`): Search specifically for code examples and their summaries from crawled documentation. This tool provides targeted code snippet retrieval for AI coding assistants.
+6. **`search_code_examples`** (requires `USE_AGENTIC_RAG=true`): Search specifically for code examples and their summaries from crawled documentation. This tool provides targeted code snippet retrieval for AI coding assistants.
 
 ## Prerequisites
 
@@ -161,9 +178,34 @@ USE_RERANKING=false
 # Supabase Configuration
 SUPABASE_URL=your_supabase_project_url
 SUPABASE_SERVICE_KEY=your_supabase_service_key
+
+# Browser Configuration (for JavaScript-heavy sites)
+BROWSER_HEADLESS=true  # Run browser in headless mode
+BROWSER_VERBOSE=false  # Enable verbose browser logging
+VIEWPORT_WIDTH=1920    # Browser viewport width in pixels
+VIEWPORT_HEIGHT=1080   # Browser viewport height in pixels
+
+# JavaScript Crawling Configuration
+ENABLE_JS_CRAWLING=true  # Enable JavaScript execution for documentation sites
+ENABLE_JS_HOOKS=true     # Enable browser hooks for complex interactions
 ```
 
 ### New Features in Latest Update
+
+#### **Enhanced JavaScript Crawling Support**
+The server now includes advanced capabilities for crawling JavaScript-heavy documentation sites:
+- **Dynamic Content Loading**: Executes JavaScript to load content that appears after page load
+- **Lazy Loading Support**: Automatically scrolls pages to trigger lazy-loaded images and content
+- **Navigation Extraction**: Extracts and follows documentation navigation links
+- **Session Persistence**: Maintains browser sessions for efficient multi-page crawling
+- **Expandable Sections**: Automatically expands collapsed content sections
+- **Custom Wait Conditions**: Waits for specific elements to ensure content is fully loaded
+
+Perfect for crawling modern documentation sites like:
+- Apple Developer Documentation
+- React/Vue/Angular docs
+- MDN Web Docs
+- Any JavaScript-powered documentation site
 
 #### **Dual LLM Provider Support**
 The server now supports using different LLM providers for different tasks:
@@ -219,6 +261,31 @@ Applies cross-encoder reranking to search results after initial retrieval. Uses 
 - **Cost**: No additional API costs - uses a local model that runs on CPU.
 - **Benefits**: Better result relevance, especially for complex queries. Works with both regular RAG search and code example search.
 
+### Browser Configuration Options
+
+The server includes several configuration options to control browser behavior for JavaScript-heavy sites:
+
+#### **BROWSER_HEADLESS** (default: true)
+Controls whether the browser runs in headless mode. Set to `false` for debugging to see what the browser is doing.
+
+#### **BROWSER_VERBOSE** (default: false)
+Enables verbose logging from the browser. Useful for troubleshooting crawling issues.
+
+#### **VIEWPORT_WIDTH** / **VIEWPORT_HEIGHT** (default: 1920x1080)
+Sets the browser viewport size. Larger viewports can help with sites that hide content on smaller screens.
+
+#### **ENABLE_JS_CRAWLING** (default: true)
+Master switch for JavaScript execution features. When enabled, the crawler will:
+- Execute JavaScript to load dynamic content
+- Scroll pages to trigger lazy loading
+- Wait for content to appear before capturing
+
+#### **ENABLE_JS_HOOKS** (default: true)
+Enables advanced browser hooks for complex interactions like:
+- Accepting cookie banners
+- Expanding collapsed sections
+- Custom page initialization
+
 ### Recommended Configurations
 
 **For general documentation RAG:**
@@ -243,6 +310,15 @@ USE_CONTEXTUAL_EMBEDDINGS=false
 USE_HYBRID_SEARCH=true
 USE_AGENTIC_RAG=false
 USE_RERANKING=false
+```
+
+**For JavaScript-heavy documentation sites:**
+```
+BROWSER_HEADLESS=true
+ENABLE_JS_CRAWLING=true
+ENABLE_JS_HOOKS=true
+USE_HYBRID_SEARCH=true
+USE_RERANKING=true
 ```
 
 ## Running the Server
@@ -335,6 +411,49 @@ Add this server to your MCP configuration for Claude Desktop, Windsurf, or any o
     }
   }
 }
+```
+
+## Usage Examples
+
+Here are some examples of how to use the tools provided by this MCP server:
+
+### Crawling a JavaScript-Heavy Documentation Site
+
+Use the specialized `crawl_documentation_site` tool for modern documentation sites:
+
+```
+# Crawl Apple's SwiftUI documentation
+crawl_documentation_site(url="https://developer.apple.com/documentation/swiftui/", max_pages=50)
+
+# Crawl React documentation with navigation following
+crawl_documentation_site(url="https://react.dev/", follow_nav_links=true)
+```
+
+### Basic Web Crawling
+
+For simpler sites or when you want more control:
+
+```
+# Crawl a single page
+crawl_single_page(url="https://example.com/blog/post")
+
+# Smart crawl that auto-detects the URL type
+smart_crawl_url(url="https://example.com/sitemap.xml", max_depth=3)
+```
+
+### Searching Crawled Content
+
+After crawling, search the indexed content:
+
+```
+# Get available sources first
+get_available_sources()
+
+# Search with source filtering
+perform_rag_query(query="SwiftUI navigation", source="developer.apple.com")
+
+# Search for code examples (requires USE_AGENTIC_RAG=true)
+search_code_examples(query="useState hook example", source_id="react.dev")
 ```
 
 ## Building Your Own Server

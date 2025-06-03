@@ -23,6 +23,7 @@ import re
 import concurrent.futures
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, MemoryAdaptiveDispatcher
+from playwright.async_api import Page, BrowserContext
 
 from utils import (
     get_supabase_client, 
@@ -62,10 +63,15 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
     Yields:
         Crawl4AIContext: The context containing the Crawl4AI crawler and Supabase client
     """
-    # Create browser configuration
+    # Create browser configuration with enhanced JavaScript support
     browser_config = BrowserConfig(
-        headless=True,
-        verbose=False
+        headless=os.getenv("BROWSER_HEADLESS", "true").lower() == "true",
+        verbose=os.getenv("BROWSER_VERBOSE", "false").lower() == "true",
+        # Add viewport size for better rendering
+        viewport={
+            "width": int(os.getenv("VIEWPORT_WIDTH", "1920")),
+            "height": int(os.getenv("VIEWPORT_HEIGHT", "1080"))
+        }
     )
     
     # Initialize the crawler
@@ -265,6 +271,182 @@ def process_code_example(args):
     code, context_before, context_after = args
     return generate_code_example_summary(code, context_before, context_after)
 
+def get_js_code_for_documentation_sites() -> List[str]:
+    """
+    Get JavaScript code snippets for handling common documentation site patterns.
+    
+    Returns:
+        List of JavaScript code snippets to execute
+    """
+    return [
+        # Scroll to trigger lazy loading
+        """
+        // Smooth scroll to bottom to trigger lazy loading
+        const scrollToBottom = async () => {
+            const scrollHeight = document.documentElement.scrollHeight;
+            const step = window.innerHeight;
+            let currentPosition = 0;
+            
+            while (currentPosition < scrollHeight) {
+                window.scrollTo(0, currentPosition);
+                currentPosition += step;
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+        };
+        scrollToBottom();
+        """,
+        
+        # Expand collapsed sections if they exist
+        """
+        // Expand all collapsible sections
+        const expandButtons = document.querySelectorAll('[aria-expanded="false"], .collapsed, .expand-button');
+        expandButtons.forEach(button => {
+            if (button.click) button.click();
+        });
+        """,
+        
+        # Click "Show more" or "Load more" buttons
+        """
+        // Click any "Show more" or "Load more" buttons
+        const loadMoreButtons = document.querySelectorAll(
+            'button:contains("more"), button:contains("More"), ' +
+            'a:contains("more"), a:contains("More"), ' +
+            '.load-more, .show-more'
+        );
+        loadMoreButtons.forEach(button => {
+            if (button.click) button.click();
+        });
+        """
+    ]
+
+def get_wait_condition_for_documentation() -> str:
+    """
+    Get a JavaScript wait condition for documentation sites.
+    
+    Returns:
+        JavaScript function that returns true when content is loaded
+    """
+    return """() => {
+        // Wait for main content to load
+        const content = document.querySelector('main, .content, #content, article, .documentation');
+        if (!content || content.innerText.length < 100) return false;
+        
+        // Check if there are code blocks (common in documentation)
+        const codeBlocks = document.querySelectorAll('pre, code, .highlight');
+        
+        // Check if navigation is loaded (for documentation sites)
+        const nav = document.querySelector('nav, .navigation, .sidebar');
+        
+        // Consider loaded if we have content and either code blocks or navigation
+        return content && (codeBlocks.length > 0 || nav);
+    }"""
+
+def create_enhanced_crawler_config(
+    url: str,
+    enable_js: bool = True,
+    wait_for_dynamic_content: bool = True,
+    scroll_page: bool = True,
+    session_id: Optional[str] = None,
+    js_only: bool = False
+) -> CrawlerRunConfig:
+    """
+    Create an enhanced crawler configuration for JavaScript-heavy sites.
+    
+    Args:
+        url: The URL being crawled
+        enable_js: Whether to enable JavaScript execution
+        wait_for_dynamic_content: Whether to wait for dynamic content
+        scroll_page: Whether to scroll the page for lazy loading
+        session_id: Optional session ID for multi-step crawling
+        js_only: Whether to reuse existing session without navigation
+        
+    Returns:
+        Enhanced CrawlerRunConfig
+    """
+    config_params = {
+        "cache_mode": CacheMode.BYPASS,
+        "stream": False,
+    }
+    
+    # Add JavaScript handling for documentation sites
+    if enable_js and is_documentation_site(url):
+        if scroll_page:
+            config_params["js_code"] = get_js_code_for_documentation_sites()
+        
+        if wait_for_dynamic_content:
+            config_params["wait_for"] = f"js:{get_wait_condition_for_documentation()}"
+            config_params["page_timeout"] = 60000  # 60 seconds
+            config_params["delay_before_return_html"] = 2.0  # Wait 2 seconds before capturing
+        
+        # Enable lazy loading support
+        config_params["wait_for_images"] = True
+        config_params["scan_full_page"] = scroll_page
+        config_params["scroll_delay"] = 0.5
+    
+    # Add session management
+    if session_id:
+        config_params["session_id"] = session_id
+        config_params["js_only"] = js_only
+    
+    return CrawlerRunConfig(**config_params)
+
+def is_documentation_site(url: str) -> bool:
+    """
+    Check if a URL is likely a documentation site.
+    
+    Args:
+        url: URL to check
+        
+    Returns:
+        True if the URL appears to be a documentation site
+    """
+    doc_patterns = [
+        'docs', 'documentation', 'developer', 'api',
+        'guide', 'tutorial', 'reference', 'manual'
+    ]
+    
+    url_lower = url.lower()
+    return any(pattern in url_lower for pattern in doc_patterns)
+
+async def setup_page_hooks(crawler: AsyncWebCrawler) -> None:
+    """
+    Set up hooks for handling complex JavaScript interactions.
+    
+    Args:
+        crawler: The AsyncWebCrawler instance
+    """
+    async def before_retrieve_html(page: Page, context: BrowserContext, **kwargs) -> Page:
+        """Hook to execute before retrieving HTML - useful for final scrolls."""
+        try:
+            # Final scroll to ensure all content is loaded
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+            await page.wait_for_timeout(1000)  # Wait 1 second
+        except Exception as e:
+            print(f"Error in before_retrieve_html hook: {e}")
+        return page
+    
+    async def on_page_context_created(page: Page, context: BrowserContext, **kwargs) -> Page:
+        """Hook for page initialization - useful for setting up the page."""
+        try:
+            # Set a larger viewport for documentation sites
+            await page.set_viewport_size({"width": 1920, "height": 1080})
+            
+            # Accept cookies if there's a banner (common on documentation sites)
+            try:
+                cookie_button = await page.query_selector('button:has-text("Accept"), button:has-text("OK"), .cookie-accept')
+                if cookie_button:
+                    await cookie_button.click()
+            except:
+                pass
+        except Exception as e:
+            print(f"Error in on_page_context_created hook: {e}")
+        return page
+    
+    # Attach hooks to the crawler
+    if hasattr(crawler, 'crawler_strategy'):
+        crawler.crawler_strategy.set_hook("before_retrieve_html", before_retrieve_html)
+        crawler.crawler_strategy.set_hook("on_page_context_created", on_page_context_created)
+
 @mcp.tool()
 async def crawl_single_page(ctx: Context, url: str) -> str:
     """
@@ -285,8 +467,18 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
         crawler = ctx.request_context.lifespan_context.crawler
         supabase_client = ctx.request_context.lifespan_context.supabase_client
         
-        # Configure the crawl
-        run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
+        # Set up hooks for enhanced JavaScript handling
+        if os.getenv("ENABLE_JS_HOOKS", "true").lower() == "true":
+            await setup_page_hooks(crawler)
+        
+        # Configure the crawl with enhanced JavaScript support
+        enable_js = os.getenv("ENABLE_JS_CRAWLING", "true").lower() == "true"
+        run_config = create_enhanced_crawler_config(
+            url=url,
+            enable_js=enable_js,
+            wait_for_dynamic_content=True,
+            scroll_page=True
+        )
         
         # Crawl the page
         result = await crawler.arun(url=url, config=run_config)
@@ -594,6 +786,204 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
             "sources_updated": len(source_content_map),
             "urls_crawled": [doc['url'] for doc in crawl_results][:5] + (["..."] if len(crawl_results) > 5 else [])
         }, indent=2)
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "url": url,
+            "error": str(e)
+        }, indent=2)
+
+@mcp.tool()
+async def crawl_documentation_site(ctx: Context, url: str, max_pages: int = 50, follow_nav_links: bool = True) -> str:
+    """
+    Crawl a documentation site with advanced JavaScript handling and navigation following.
+    
+    This tool is specifically designed for JavaScript-heavy documentation sites that load content
+    dynamically. It handles:
+    - Dynamic content loading with JavaScript
+    - Lazy-loaded images and code blocks
+    - Expandable/collapsible sections
+    - JavaScript-based navigation
+    - Session persistence for better performance
+    
+    Args:
+        ctx: The MCP server provided context
+        url: URL of the documentation site to crawl
+        max_pages: Maximum number of pages to crawl (default: 50)
+        follow_nav_links: Whether to follow navigation links (default: True)
+    
+    Returns:
+        JSON string with crawl summary and storage information
+    """
+    try:
+        # Get the crawler from the context
+        crawler = ctx.request_context.lifespan_context.crawler
+        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        
+        # Set up hooks for documentation sites
+        await setup_page_hooks(crawler)
+        
+        # Create a session for the documentation site
+        parsed_url = urlparse(url)
+        session_id = f"doc_session_{parsed_url.netloc}"
+        
+        # First, crawl the main page to discover navigation structure
+        initial_config = create_enhanced_crawler_config(
+            url=url,
+            enable_js=True,
+            wait_for_dynamic_content=True,
+            scroll_page=True,
+            session_id=session_id
+        )
+        
+        # Add custom JavaScript to extract navigation links
+        nav_extraction_js = """
+        // Extract navigation links from common documentation patterns
+        const navLinks = [];
+        const selectors = [
+            'nav a', '.nav a', '.navigation a', '.sidebar a',
+            '.toc a', '.table-of-contents a', '[role="navigation"] a',
+            '.docs-nav a', '.documentation-nav a'
+        ];
+        
+        selectors.forEach(selector => {
+            document.querySelectorAll(selector).forEach(link => {
+                const href = link.href;
+                const text = link.textContent.trim();
+                if (href && text && href.startsWith(window.location.origin)) {
+                    navLinks.push({href, text});
+                }
+            });
+        });
+        
+        // Store in window for retrieval
+        window.__navLinks = navLinks;
+        """
+        
+        initial_config.js_code = initial_config.js_code or []
+        if isinstance(initial_config.js_code, str):
+            initial_config.js_code = [initial_config.js_code]
+        initial_config.js_code.append(nav_extraction_js)
+        
+        # Crawl the initial page
+        result = await crawler.arun(url=url, config=initial_config)
+        
+        urls_to_crawl = [url]
+        crawled_results = []
+        
+        if result.success:
+            crawled_results.append({'url': url, 'markdown': result.markdown})
+            
+            # Extract navigation links if follow_nav_links is enabled
+            if follow_nav_links:
+                try:
+                    # Try to get navigation links from the page
+                    nav_links_config = CrawlerRunConfig(
+                        session_id=session_id,
+                        js_only=True,
+                        js_code="JSON.stringify(window.__navLinks || [])",
+                        cache_mode=CacheMode.BYPASS
+                    )
+                    nav_result = await crawler.arun(url=url, config=nav_links_config)
+                    
+                    if nav_result.success and nav_result.html:
+                        try:
+                            # Parse navigation links
+                            nav_links = json.loads(nav_result.html)
+                            for link in nav_links[:max_pages - 1]:  # Limit to max_pages
+                                if link['href'] not in urls_to_crawl:
+                                    urls_to_crawl.append(link['href'])
+                        except json.JSONDecodeError:
+                            print("Could not parse navigation links")
+                except Exception as e:
+                    print(f"Error extracting navigation links: {e}")
+        
+        # Crawl remaining URLs using the session
+        for i, next_url in enumerate(urls_to_crawl[1:], 1):
+            if i >= max_pages:
+                break
+                
+            try:
+                next_config = create_enhanced_crawler_config(
+                    url=next_url,
+                    enable_js=True,
+                    wait_for_dynamic_content=True,
+                    scroll_page=True,
+                    session_id=session_id,
+                    js_only=False  # Navigate to new pages
+                )
+                
+                result = await crawler.arun(url=next_url, config=next_config)
+                if result.success and result.markdown:
+                    crawled_results.append({'url': next_url, 'markdown': result.markdown})
+            except Exception as e:
+                print(f"Error crawling {next_url}: {e}")
+        
+        # Clean up session
+        if hasattr(crawler, 'crawler_strategy'):
+            try:
+                await crawler.crawler_strategy.kill_session(session_id)
+            except Exception as e:
+                print(f"Error cleaning up session: {e}")
+        
+        # Process and store results
+        if not crawled_results:
+            return json.dumps({
+                "success": False,
+                "url": url,
+                "error": "No content found"
+            }, indent=2)
+        
+        # Store in Supabase (similar to smart_crawl_url)
+        urls = []
+        chunk_numbers = []
+        contents = []
+        metadatas = []
+        chunk_count = 0
+        source_id = parsed_url.netloc
+        total_word_count = 0
+        
+        for doc in crawled_results:
+            doc_url = doc['url']
+            md = doc['markdown']
+            chunks = smart_chunk_markdown(md, chunk_size=5000)
+            
+            for i, chunk in enumerate(chunks):
+                urls.append(doc_url)
+                chunk_numbers.append(i)
+                contents.append(chunk)
+                
+                meta = extract_section_info(chunk)
+                meta["chunk_index"] = i
+                meta["url"] = doc_url
+                meta["source"] = source_id
+                meta["crawl_type"] = "documentation"
+                metadatas.append(meta)
+                
+                total_word_count += meta.get("word_count", 0)
+                chunk_count += 1
+        
+        # Create url_to_full_document mapping
+        url_to_full_document = {doc['url']: doc['markdown'] for doc in crawled_results}
+        
+        # Update source information
+        source_summary = extract_source_summary(source_id, crawled_results[0]['markdown'][:5000])
+        update_source_info(supabase_client, source_id, source_summary, total_word_count)
+        
+        # Add to Supabase
+        add_documents_to_supabase(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document)
+        
+        return json.dumps({
+            "success": True,
+            "url": url,
+            "crawl_type": "documentation",
+            "pages_crawled": len(crawled_results),
+            "chunks_stored": chunk_count,
+            "total_word_count": total_word_count,
+            "source_id": source_id,
+            "urls_crawled": [doc['url'] for doc in crawled_results][:10] + (["..."] if len(crawled_results) > 10 else [])
+        }, indent=2)
+        
     except Exception as e:
         return json.dumps({
             "success": False,
@@ -959,7 +1349,8 @@ async def crawl_markdown_file(crawler: AsyncWebCrawler, url: str) -> List[Dict[s
     Returns:
         List of dictionaries with URL and markdown content
     """
-    crawl_config = CrawlerRunConfig()
+    # Text files usually don't need JavaScript handling
+    crawl_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
 
     result = await crawler.arun(url=url, config=crawl_config)
     if result.success and result.markdown:
@@ -970,7 +1361,7 @@ async def crawl_markdown_file(crawler: AsyncWebCrawler, url: str) -> List[Dict[s
 
 async def crawl_batch(crawler: AsyncWebCrawler, urls: List[str], max_concurrent: int = 10) -> List[Dict[str, Any]]:
     """
-    Batch crawl multiple URLs in parallel.
+    Batch crawl multiple URLs in parallel with enhanced JavaScript support.
     
     Args:
         crawler: AsyncWebCrawler instance
@@ -980,19 +1371,50 @@ async def crawl_batch(crawler: AsyncWebCrawler, urls: List[str], max_concurrent:
     Returns:
         List of dictionaries with URL and markdown content
     """
-    crawl_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
+    # Set up hooks once for all crawls
+    if os.getenv("ENABLE_JS_HOOKS", "true").lower() == "true" and urls:
+        # Check if any URL is a documentation site
+        if any(is_documentation_site(url) for url in urls):
+            await setup_page_hooks(crawler)
+    
+    # Create configurations for each URL
+    configs = []
+    enable_js = os.getenv("ENABLE_JS_CRAWLING", "true").lower() == "true"
+    
+    for url in urls:
+        config = create_enhanced_crawler_config(
+            url=url,
+            enable_js=enable_js and is_documentation_site(url),
+            wait_for_dynamic_content=True,
+            scroll_page=True
+        )
+        configs.append(config)
+    
     dispatcher = MemoryAdaptiveDispatcher(
         memory_threshold_percent=70.0,
         check_interval=1.0,
         max_session_permit=max_concurrent
     )
-
-    results = await crawler.arun_many(urls=urls, config=crawl_config, dispatcher=dispatcher)
+    
+    # If all URLs need the same config, we can use a single config
+    if all(is_documentation_site(url) == is_documentation_site(urls[0]) for url in urls):
+        results = await crawler.arun_many(urls=urls, config=configs[0], dispatcher=dispatcher)
+    else:
+        # Otherwise, crawl each URL individually with its specific config
+        results = []
+        for url, config in zip(urls, configs):
+            try:
+                result = await crawler.arun(url=url, config=config)
+                if result.success and result.markdown:
+                    results.append(result)
+            except Exception as e:
+                print(f"Error crawling {url}: {e}")
+    
     return [{'url': r.url, 'markdown': r.markdown} for r in results if r.success and r.markdown]
 
 async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: List[str], max_depth: int = 3, max_concurrent: int = 10) -> List[Dict[str, Any]]:
     """
-    Recursively crawl internal links from start URLs up to a maximum depth.
+    Recursively crawl internal links from start URLs up to a maximum depth with enhanced JavaScript support.
     
     Args:
         crawler: AsyncWebCrawler instance
@@ -1003,7 +1425,18 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
     Returns:
         List of dictionaries with URL and markdown content
     """
-    run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
+    # Set up hooks once for documentation sites
+    if os.getenv("ENABLE_JS_HOOKS", "true").lower() == "true" and start_urls:
+        if any(is_documentation_site(url) for url in start_urls):
+            await setup_page_hooks(crawler)
+    
+    enable_js = os.getenv("ENABLE_JS_CRAWLING", "true").lower() == "true"
+    
+    # Create session ID for documentation sites to maintain state
+    session_id = None
+    if enable_js and start_urls and is_documentation_site(start_urls[0]):
+        session_id = f"doc_session_{urlparse(start_urls[0]).netloc}"
+    
     dispatcher = MemoryAdaptiveDispatcher(
         memory_threshold_percent=70.0,
         check_interval=1.0,
@@ -1035,7 +1468,33 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
         if not urls_to_crawl:
             break
 
-        results = await crawler.arun_many(urls=urls_to_crawl, config=run_config, dispatcher=dispatcher)
+        # Create configurations for each URL
+        configs = []
+        for url in urls_to_crawl:
+            config = create_enhanced_crawler_config(
+                url=url,
+                enable_js=enable_js and is_documentation_site(url),
+                wait_for_dynamic_content=True,
+                scroll_page=True,
+                session_id=session_id if is_documentation_site(url) else None,
+                js_only=depth > 0 and session_id is not None  # Reuse session after first depth
+            )
+            configs.append(config)
+        
+        # Crawl URLs
+        if all(is_documentation_site(url) == is_documentation_site(urls_to_crawl[0]) for url in urls_to_crawl):
+            # All URLs are similar, use same config
+            results = await crawler.arun_many(urls=urls_to_crawl, config=configs[0], dispatcher=dispatcher)
+        else:
+            # Mixed URL types, crawl individually
+            results = []
+            for url, config in zip(urls_to_crawl, configs):
+                try:
+                    result = await crawler.arun(url=url, config=config)
+                    results.append(result)
+                except Exception as e:
+                    print(f"Error crawling {url}: {e}")
+        
         next_level_urls = set()
 
         for result in results:
@@ -1055,6 +1514,13 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
                         next_level_urls.add(next_url)
 
         current_urls = next_level_urls
+    
+    # Clean up session if created
+    if session_id and hasattr(crawler, 'crawler_strategy'):
+        try:
+            await crawler.crawler_strategy.kill_session(session_id)
+        except Exception as e:
+            print(f"Error cleaning up session {session_id}: {e}")
 
     return results_all
 
