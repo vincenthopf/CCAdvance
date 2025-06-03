@@ -1015,6 +1015,16 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
     def normalize_url(url):
         return urldefrag(url)[0]
 
+    # Extract base path from the first start URL to use as prefix filter
+    base_path_prefix = None
+    if start_urls:
+        parsed = urlparse(start_urls[0])
+        # Use the full path as the prefix for filtering
+        base_path_prefix = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        # Remove trailing slash if present
+        if base_path_prefix.endswith('/'):
+            base_path_prefix = base_path_prefix[:-1]
+
     current_urls = set([normalize_url(u) for u in start_urls])
     results_all = []
 
@@ -1034,6 +1044,11 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
                 results_all.append({'url': result.url, 'markdown': result.markdown})
                 for link in result.links.get("internal", []):
                     next_url = normalize_url(link["href"])
+                    
+                    # Filter URLs to only include those under the base path
+                    if base_path_prefix and not next_url.startswith(base_path_prefix):
+                        continue
+                    
                     if next_url not in visited:
                         next_level_urls.add(next_url)
 
