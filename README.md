@@ -8,7 +8,6 @@
   *Intelligent documentation indexing and retrieval for AI-powered development*
 </div>
 
----
 # Note: CCAdvance is under VERY active development. Expect breaking changes.
 ## Overview
 
