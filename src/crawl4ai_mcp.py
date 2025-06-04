@@ -279,10 +279,9 @@ def get_js_code_for_documentation_sites() -> List[str]:
         List of JavaScript code snippets to execute
     """
     return [
-        # Scroll to trigger lazy loading
+        # Scroll to trigger lazy loading - Using IIFE to wrap async function
         """
-        // Smooth scroll to bottom to trigger lazy loading
-        const scrollToBottom = async () => {
+        (async () => {
             const scrollHeight = document.documentElement.scrollHeight;
             const step = window.innerHeight;
             let currentPosition = 0;
@@ -292,29 +291,24 @@ def get_js_code_for_documentation_sites() -> List[str]:
                 currentPosition += step;
                 await new Promise(resolve => setTimeout(resolve, 500));
             }
-        };
-        scrollToBottom();
+        })();
         """,
         
-        # Expand collapsed sections if they exist
+        # Expand collapsed sections if they exist - Simple synchronous code
         """
-        // Expand all collapsible sections
-        const expandButtons = document.querySelectorAll('[aria-expanded="false"], .collapsed, .expand-button');
-        expandButtons.forEach(button => {
-            if (button.click) button.click();
+        document.querySelectorAll('[aria-expanded="false"], .collapsed, .expand-button').forEach(button => {
+            if (button && button.click) button.click();
         });
         """,
         
-        # Click "Show more" or "Load more" buttons
+        # Click "Show more" or "Load more" buttons - Using Array.from for better compatibility
         """
-        // Click any "Show more" or "Load more" buttons
-        const loadMoreButtons = document.querySelectorAll(
-            'button:contains("more"), button:contains("More"), ' +
-            'a:contains("more"), a:contains("More"), ' +
-            '.load-more, .show-more'
-        );
-        loadMoreButtons.forEach(button => {
-            if (button.click) button.click();
+        Array.from(document.querySelectorAll('button, a')).filter(el => 
+            el.textContent && (el.textContent.toLowerCase().includes('more') || 
+            el.className.includes('load-more') || 
+            el.className.includes('show-more'))
+        ).forEach(button => {
+            if (button && button.click) button.click();
         });
         """
     ]
@@ -838,26 +832,28 @@ async def crawl_documentation_site(ctx: Context, url: str, max_pages: int = 50, 
         
         # Add custom JavaScript to extract navigation links
         nav_extraction_js = """
-        // Extract navigation links from common documentation patterns
-        const navLinks = [];
-        const selectors = [
-            'nav a', '.nav a', '.navigation a', '.sidebar a',
-            '.toc a', '.table-of-contents a', '[role="navigation"] a',
-            '.docs-nav a', '.documentation-nav a'
-        ];
-        
-        selectors.forEach(selector => {
-            document.querySelectorAll(selector).forEach(link => {
-                const href = link.href;
-                const text = link.textContent.trim();
-                if (href && text && href.startsWith(window.location.origin)) {
-                    navLinks.push({href, text});
-                }
+        (() => {
+            // Extract navigation links from common documentation patterns
+            const navLinks = [];
+            const selectors = [
+                'nav a', '.nav a', '.navigation a', '.sidebar a',
+                '.toc a', '.table-of-contents a', '[role="navigation"] a',
+                '.docs-nav a', '.documentation-nav a'
+            ];
+            
+            selectors.forEach(selector => {
+                document.querySelectorAll(selector).forEach(link => {
+                    const href = link.href;
+                    const text = link.textContent.trim();
+                    if (href && text && href.startsWith(window.location.origin)) {
+                        navLinks.push({href, text});
+                    }
+                });
             });
-        });
-        
-        // Store in window for retrieval
-        window.__navLinks = navLinks;
+            
+            // Store in window for retrieval
+            window.__navLinks = navLinks;
+        })();
         """
         
         initial_config.js_code = initial_config.js_code or []
