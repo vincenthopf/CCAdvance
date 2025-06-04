@@ -9,7 +9,7 @@
 </div>
 
 ---
-
+# Note: CCAdvance is under VERY active development. Expect breaking changes.
 ## Overview
 
 CCAdvance is a Model Context Protocol (MCP) server designed specifically for Claude Code users who need advanced web crawling and RAG capabilities. It enables Claude Code to intelligently crawl documentation sites, extract code examples, and provide contextual search across indexed content.
@@ -219,9 +219,9 @@ If you're not using Claude Code, you can integrate with other MCP clients:
 - **Graceful Degradation** - Never fails completely on API limits
 - **Jitter Prevention** - Avoids thundering herd problems
 
-## Contributing
+## Contributing & Credits
 
-CCAdvance is built on the [Mem0 MCP server template](https://github.com/coleam00/mcp-mem0/). Contributions are welcome for improving Claude Code integration, crawling capabilities, and RAG strategies.
+CCAdvance is built on top of [coleam00's](https://github.com/coleam00) [mcp-crawl4ai-rag](https://github.com/coleam00/mcp-crawl4ai-rag). Contributions are welcome for improving Claude Code integration, crawling capabilities, and RAG strategies.
 
 ## License
 
