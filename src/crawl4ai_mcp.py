@@ -396,8 +396,6 @@ def create_enhanced_crawler_config(
             config_params["wait_for"] = f"js:{get_wait_condition_for_documentation()}"
             config_params["page_timeout"] = 45000  # Reduced to 45 seconds
             config_params["delay_before_return_html"] = 1.5  # Reduced delay
-            config_params["navigation_timeout"] = 30000  # Add navigation timeout
-            config_params["response_timeout"] = 30000  # Add response timeout
         
         # Enable lazy loading support
         config_params["wait_for_images"] = True
