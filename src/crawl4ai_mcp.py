@@ -279,60 +279,85 @@ def get_js_code_for_documentation_sites() -> List[str]:
         List of JavaScript code snippets to execute
     """
     return [
-        # Scroll to trigger lazy loading - Using IIFE to wrap async function
+        # Scroll to trigger lazy loading - Using IIFE with timeout protection
         """
         (async () => {
+            const startTime = Date.now();
+            const maxTime = 30000; // 30 second timeout
             const scrollHeight = document.documentElement.scrollHeight;
             const step = window.innerHeight;
             let currentPosition = 0;
             
-            while (currentPosition < scrollHeight) {
+            while (currentPosition < scrollHeight && (Date.now() - startTime) < maxTime) {
                 window.scrollTo(0, currentPosition);
                 currentPosition += step;
-                await new Promise(resolve => setTimeout(resolve, 500));
+                await new Promise(resolve => setTimeout(resolve, 200)); // Reduced delay
+                
+                // Break if we've reached the bottom
+                if (currentPosition + step >= scrollHeight) break;
             }
         })();
         """,
         
-        # Expand collapsed sections if they exist - Simple synchronous code
+        # Expand collapsed sections if they exist - With timeout protection
         """
-        document.querySelectorAll('[aria-expanded="false"], .collapsed, .expand-button').forEach(button => {
-            if (button && button.click) button.click();
-        });
+        try {
+            const buttons = document.querySelectorAll('[aria-expanded="false"], .collapsed, .expand-button');
+            let clickCount = 0;
+            buttons.forEach(button => {
+                if (button && button.click && clickCount < 10) { // Limit clicks
+                    button.click();
+                    clickCount++;
+                }
+            });
+        } catch(e) { console.log('Expand sections error:', e); }
         """,
         
-        # Click "Show more" or "Load more" buttons - Using Array.from for better compatibility
+        # Click "Show more" or "Load more" buttons - With safety limits
         """
-        Array.from(document.querySelectorAll('button, a')).filter(el => 
-            el.textContent && (el.textContent.toLowerCase().includes('more') || 
-            el.className.includes('load-more') || 
-            el.className.includes('show-more'))
-        ).forEach(button => {
-            if (button && button.click) button.click();
-        });
+        try {
+            const moreButtons = Array.from(document.querySelectorAll('button, a')).filter(el => 
+                el.textContent && (el.textContent.toLowerCase().includes('more') || 
+                el.className.includes('load-more') || 
+                el.className.includes('show-more'))
+            ).slice(0, 5); // Limit to first 5 buttons
+            
+            moreButtons.forEach(button => {
+                if (button && button.click) button.click();
+            });
+        } catch(e) { console.log('Load more error:', e); }
         """
     ]
 
 def get_wait_condition_for_documentation() -> str:
     """
-    Get a JavaScript wait condition for documentation sites.
+    Get a JavaScript wait condition for documentation sites with timeout protection.
     
     Returns:
         JavaScript function that returns true when content is loaded
     """
     return """() => {
-        // Wait for main content to load
-        const content = document.querySelector('main, .content, #content, article, .documentation');
-        if (!content || content.innerText.length < 100) return false;
-        
-        // Check if there are code blocks (common in documentation)
-        const codeBlocks = document.querySelectorAll('pre, code, .highlight');
-        
-        // Check if navigation is loaded (for documentation sites)
-        const nav = document.querySelector('nav, .navigation, .sidebar');
-        
-        // Consider loaded if we have content and either code blocks or navigation
-        return content && (codeBlocks.length > 0 || nav);
+        try {
+            // Add timeout protection - return true after 30 seconds regardless
+            if (!window.__doc_wait_start) window.__doc_wait_start = Date.now();
+            if (Date.now() - window.__doc_wait_start > 30000) return true;
+            
+            // Wait for main content to load
+            const content = document.querySelector('main, .content, #content, article, .documentation');
+            if (!content || content.innerText.length < 100) return false;
+            
+            // Check if there are code blocks (common in documentation)
+            const codeBlocks = document.querySelectorAll('pre, code, .highlight');
+            
+            // Check if navigation is loaded (for documentation sites)
+            const nav = document.querySelector('nav, .navigation, .sidebar');
+            
+            // Consider loaded if we have content and either code blocks or navigation
+            return content && (codeBlocks.length > 0 || nav);
+        } catch(e) {
+            console.log('Wait condition error:', e);
+            return true; // Return true on error to prevent hanging
+        }
     }"""
 
 def create_enhanced_crawler_config(
@@ -369,8 +394,10 @@ def create_enhanced_crawler_config(
         
         if wait_for_dynamic_content:
             config_params["wait_for"] = f"js:{get_wait_condition_for_documentation()}"
-            config_params["page_timeout"] = 60000  # 60 seconds
-            config_params["delay_before_return_html"] = 2.0  # Wait 2 seconds before capturing
+            config_params["page_timeout"] = 45000  # Reduced to 45 seconds
+            config_params["delay_before_return_html"] = 1.5  # Reduced delay
+            config_params["navigation_timeout"] = 30000  # Add navigation timeout
+            config_params["response_timeout"] = 30000  # Add response timeout
         
         # Enable lazy loading support
         config_params["wait_for_images"] = True
@@ -613,10 +640,16 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
     Returns:
         JSON string with crawl summary and storage information
     """
+    import time
+    start_time = time.time()
+    max_total_time = int(os.getenv("MAX_CRAWL_TIME_SECONDS", "2400"))  # Default 40 minutes, configurable via env
+    
     try:
         # Get the crawler from the context
         crawler = ctx.request_context.lifespan_context.crawler
         supabase_client = ctx.request_context.lifespan_context.supabase_client
+        
+        print(f"[SMART_CRAWL_START] URL: {url}, max_depth: {max_depth}, max_concurrent: {max_concurrent}")
         
         # Determine the crawl strategy
         crawl_results = []
@@ -1411,6 +1444,7 @@ async def crawl_batch(crawler: AsyncWebCrawler, urls: List[str], max_concurrent:
 async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: List[str], max_depth: int = 3, max_concurrent: int = 10) -> List[Dict[str, Any]]:
     """
     Recursively crawl internal links from start URLs up to a maximum depth with enhanced JavaScript support.
+    Includes circuit breaker functionality and comprehensive timeout management.
     
     Args:
         crawler: AsyncWebCrawler instance
@@ -1421,6 +1455,15 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
     Returns:
         List of dictionaries with URL and markdown content
     """
+    import time
+    
+    # Circuit breaker state
+    failed_urls = set()
+    max_failures_per_url = 3
+    url_failure_count = {}
+    start_time = time.time()
+    max_crawl_time = int(os.getenv("MAX_RECURSIVE_CRAWL_TIME_SECONDS", "1800"))  # Default 30 minutes, configurable via env
+    max_urls_per_depth = 50  # Limit URLs per depth level
     # Set up hooks once for documentation sites
     if os.getenv("ENABLE_JS_HOOKS", "true").lower() == "true" and start_urls:
         if any(is_documentation_site(url) for url in start_urls):
@@ -1440,9 +1483,24 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
     )
 
     visited = set()
+    crawl_start_time = time.time()
 
     def normalize_url(url):
         return urldefrag(url)[0]
+    
+    def should_skip_url(url: str) -> bool:
+        """Circuit breaker: skip URLs that have failed too many times"""
+        if url in failed_urls:
+            return True
+        if url_failure_count.get(url, 0) >= max_failures_per_url:
+            failed_urls.add(url)
+            return True
+        return False
+    
+    def record_url_failure(url: str):
+        """Record a URL failure for circuit breaker"""
+        url_failure_count[url] = url_failure_count.get(url, 0) + 1
+        print(f"[CRAWL_ERROR] URL failed ({url_failure_count[url]}/{max_failures_per_url}): {url}")
 
     # Extract base path from the first start URL to use as prefix filter
     base_path_prefix = None
@@ -1460,9 +1518,22 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
     results_all = []
 
     for depth in range(max_depth):
-        urls_to_crawl = [normalize_url(url) for url in current_urls if normalize_url(url) not in visited]
-        if not urls_to_crawl:
+        # Check global timeout
+        if time.time() - crawl_start_time > max_crawl_time:
+            print(f"[CRAWL_TIMEOUT] Max crawl time ({max_crawl_time}s) exceeded")
             break
+            
+        # Filter URLs and apply circuit breaker
+        urls_to_crawl = [
+            normalize_url(url) for url in current_urls 
+            if normalize_url(url) not in visited and not should_skip_url(normalize_url(url))
+        ][:max_urls_per_depth]  # Limit URLs per depth
+        
+        if not urls_to_crawl:
+            print(f"[CRAWL_INFO] No more URLs to crawl at depth {depth}")
+            break
+            
+        print(f"[CRAWL_INFO] Depth {depth}: Crawling {len(urls_to_crawl)} URLs")
 
         # Create configurations for each URL
         configs = []
@@ -1477,47 +1548,100 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
             )
             configs.append(config)
         
-        # Crawl URLs
-        if all(is_documentation_site(url) == is_documentation_site(urls_to_crawl[0]) for url in urls_to_crawl):
-            # All URLs are similar, use same config
-            results = await crawler.arun_many(urls=urls_to_crawl, config=configs[0], dispatcher=dispatcher)
-        else:
-            # Mixed URL types, crawl individually
-            results = []
-            for url, config in zip(urls_to_crawl, configs):
+        # Crawl URLs with timeout protection
+        results = []
+        batch_start_time = time.time()
+        batch_timeout = 600  # 10 minutes per batch
+        
+        try:
+            if all(is_documentation_site(url) == is_documentation_site(urls_to_crawl[0]) for url in urls_to_crawl):
+                # All URLs are similar, use batch crawling with timeout
+                batch_task = asyncio.create_task(
+                    crawler.arun_many(urls=urls_to_crawl, config=configs[0], dispatcher=dispatcher)
+                )
                 try:
-                    result = await crawler.arun(url=url, config=config)
-                    results.append(result)
-                except Exception as e:
-                    print(f"Error crawling {url}: {e}")
+                    results = await asyncio.wait_for(batch_task, timeout=batch_timeout)
+                except asyncio.TimeoutError:
+                    print(f"[CRAWL_TIMEOUT] Batch crawl timed out after {batch_timeout}s")
+                    batch_task.cancel()
+                    # Record failures for all URLs in batch
+                    for url in urls_to_crawl:
+                        record_url_failure(url)
+                    results = []
+            else:
+                # Mixed URL types, crawl individually with timeouts
+                for url, config in zip(urls_to_crawl, configs):
+                    if time.time() - batch_start_time > batch_timeout:
+                        print(f"[CRAWL_TIMEOUT] Batch timeout reached, stopping individual crawls")
+                        break
+                        
+                    try:
+                        print(f"[CRAWL_FETCH] {url}")
+                        crawl_task = asyncio.create_task(crawler.arun(url=url, config=config))
+                        result = await asyncio.wait_for(crawl_task, timeout=60)  # 60s per URL
+                        results.append(result)
+                        print(f"[CRAWL_SUCCESS] {url}")
+                    except asyncio.TimeoutError:
+                        print(f"[CRAWL_TIMEOUT] URL timed out: {url}")
+                        record_url_failure(url)
+                        crawl_task.cancel()
+                    except Exception as e:
+                        print(f"[CRAWL_ERROR] Error crawling {url}: {e}")
+                        record_url_failure(url)
+        except Exception as e:
+            print(f"[CRAWL_ERROR] Batch crawl error: {e}")
+            results = []
         
         next_level_urls = set()
 
+        # Process results with link extraction limits
+        link_count = 0
+        max_links_per_page = 20  # Limit links per page to prevent explosion
+        
         for result in results:
             norm_url = normalize_url(result.url)
             visited.add(norm_url)
 
             if result.success and result.markdown:
                 results_all.append({'url': result.url, 'markdown': result.markdown})
-                for link in result.links.get("internal", []):
+                print(f"[CRAWL_COMPLETE] {result.url} | Content: {len(result.markdown)} chars")
+                
+                # Extract internal links with limits
+                internal_links = result.links.get("internal", [])[:max_links_per_page]
+                for link in internal_links:
+                    if link_count >= max_urls_per_depth * 2:  # Global link limit
+                        break
+                        
                     next_url = normalize_url(link["href"])
                     
                     # Filter URLs to only include those under the base path
                     if base_path_prefix and not next_url.startswith(base_path_prefix):
                         continue
                     
-                    if next_url not in visited:
+                    if next_url not in visited and not should_skip_url(next_url):
                         next_level_urls.add(next_url)
+                        link_count += 1
+            else:
+                print(f"[CRAWL_FAILED] {result.url}: {getattr(result, 'error_message', 'Unknown error')}")
+                record_url_failure(result.url)
 
         current_urls = next_level_urls
+        print(f"[CRAWL_INFO] Depth {depth} complete. Found {len(next_level_urls)} new URLs. Total results: {len(results_all)}")
     
     # Clean up session if created
     if session_id and hasattr(crawler, 'crawler_strategy'):
         try:
-            await crawler.crawler_strategy.kill_session(session_id)
+            cleanup_task = asyncio.create_task(crawler.crawler_strategy.kill_session(session_id))
+            await asyncio.wait_for(cleanup_task, timeout=10)  # 10s timeout for cleanup
+            print(f"[CRAWL_CLEANUP] Session {session_id} cleaned up")
+        except asyncio.TimeoutError:
+            print(f"[CRAWL_TIMEOUT] Session cleanup timed out: {session_id}")
+            cleanup_task.cancel()
         except Exception as e:
-            print(f"Error cleaning up session {session_id}: {e}")
+            print(f"[CRAWL_ERROR] Error cleaning up session {session_id}: {e}")
 
+    total_time = time.time() - crawl_start_time
+    print(f"[CRAWL_SUMMARY] Completed in {total_time:.1f}s. Crawled {len(results_all)} pages. Failed URLs: {len(failed_urls)}")
     return results_all
 
 async def main():
