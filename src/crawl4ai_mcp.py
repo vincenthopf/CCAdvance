@@ -24,6 +24,8 @@ import concurrent.futures
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, MemoryAdaptiveDispatcher
 
+# Import the new provider system and updated utils
+from providers import get_provider, BaseProvider
 from utils import (
     get_supabase_client, 
     add_documents_to_supabase, 
@@ -49,6 +51,7 @@ class Crawl4AIContext:
     """Context for the Crawl4AI MCP server."""
     crawler: AsyncWebCrawler
     supabase_client: Client
+    ai_provider: BaseProvider
     reranking_model: Optional[CrossEncoder] = None
 
 @asynccontextmanager
@@ -60,18 +63,12 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
         server: The FastMCP server instance
         
     Yields:
-        Crawl4AIContext: The context containing the Crawl4AI crawler and Supabase client
+        Crawl4AIContext: The context containing the Crawl4AI crawler, Supabase client, and AI provider
     """
-    # Create browser configuration optimized for JavaScript-heavy sites
+    # Create browser configuration
     browser_config = BrowserConfig(
         headless=True,
-        verbose=False,
-        # Enable JavaScript execution
-        java_script_enabled=True,
-        # Set viewport for better rendering
-        viewport={"width": 1920, "height": 1080},
-        # Additional browser args for better compatibility
-        extra_args=["--disable-blink-features=AutomationControlled"]
+        verbose=False
     )
     
     # Initialize the crawler
@@ -80,6 +77,10 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
     
     # Initialize Supabase client
     supabase_client = get_supabase_client()
+    
+    # Initialize AI provider
+    ai_provider = get_provider()
+    print(f"Initialized AI provider: {ai_provider.provider_name}")
     
     # Initialize cross-encoder model for reranking if enabled
     reranking_model = None
@@ -94,6 +95,7 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
         yield Crawl4AIContext(
             crawler=crawler,
             supabase_client=supabase_client,
+            ai_provider=ai_provider,
             reranking_model=reranking_model
         )
     finally:
@@ -257,10 +259,10 @@ def extract_section_info(chunk: str) -> Dict[str, Any]:
         "word_count": len(chunk.split())
     }
 
-def process_code_example(args):
+async def process_code_example(args):
     """
     Process a single code example to generate its summary.
-    This function is designed to be used with concurrent.futures.
+    This function is designed to be used with asyncio.
     
     Args:
         args: Tuple containing (code, context_before, context_after)
@@ -269,7 +271,7 @@ def process_code_example(args):
         The generated summary
     """
     code, context_before, context_after = args
-    return generate_code_example_summary(code, context_before, context_after)
+    return await generate_code_example_summary(code, context_before, context_after)
 
 @mcp.tool()
 async def crawl_single_page(ctx: Context, url: str) -> str:
@@ -291,22 +293,8 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
         crawler = ctx.request_context.lifespan_context.crawler
         supabase_client = ctx.request_context.lifespan_context.supabase_client
         
-        # Configure the crawl with JavaScript support
-        run_config = CrawlerRunConfig(
-            cache_mode=CacheMode.BYPASS, 
-            stream=False,
-            # JavaScript handling for dynamic content
-            wait_for="js:() => document.readyState === 'complete'",
-            page_timeout=60000,  # 60 seconds timeout
-            delay_before_return_html=2.0,  # Wait 2 seconds after page load
-            # Enable JavaScript execution
-            js_code="""
-            // Scroll to trigger lazy loading
-            window.scrollTo(0, document.body.scrollHeight);
-            // Wait a bit for dynamic content
-            await new Promise(r => setTimeout(r, 1000));
-            """
-        )
+        # Configure the crawl
+        run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
         
         # Crawl the page
         result = await crawler.arun(url=url, config=run_config)
@@ -346,11 +334,11 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
             url_to_full_document = {url: result.markdown}
             
             # Update source information FIRST (before inserting documents)
-            source_summary = extract_source_summary(source_id, result.markdown[:5000])  # Use first 5000 chars for summary
+            source_summary = await extract_source_summary(source_id, result.markdown[:5000])  # Use first 5000 chars for summary
             update_source_info(supabase_client, source_id, source_summary, total_word_count)
             
             # Add documentation chunks to Supabase (AFTER source exists)
-            add_documents_to_supabase(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document)
+            await add_documents_to_supabase(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document)
             
             # Extract and process code examples only if enabled
             extract_code_examples = os.getenv("USE_AGENTIC_RAG", "false") == "true"
@@ -363,14 +351,14 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
                     code_summaries = []
                     code_metadatas = []
                     
-                    # Process code examples in parallel (reduced workers to avoid rate limits)
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-                        # Prepare arguments for parallel processing
-                        summary_args = [(block['code'], block['context_before'], block['context_after']) 
-                                        for block in code_blocks]
-                        
-                        # Generate summaries in parallel
-                        summaries = list(executor.map(process_code_example, summary_args))
+                    # Process code examples in parallel with asyncio
+                    summary_args = [(block['code'], block['context_before'], block['context_after']) 
+                                    for block in code_blocks]
+                    
+                    # Generate summaries in parallel using asyncio
+                    summaries = await asyncio.gather(*[
+                        process_code_example(args) for args in summary_args
+                    ])
                     
                     # Prepare code example data
                     for i, (block, summary) in enumerate(zip(code_blocks, summaries)):
@@ -390,7 +378,7 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
                         code_metadatas.append(code_meta)
                     
                     # Add code examples to Supabase
-                    add_code_examples_to_supabase(
+                    await add_code_examples_to_supabase(
                         supabase_client, 
                         code_urls, 
                         code_chunk_numbers, 
@@ -472,11 +460,9 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
             crawl_results = await crawl_batch(crawler, sitemap_urls, max_concurrent=max_concurrent)
             crawl_type = "sitemap"
         else:
-            # For regular URLs, use recursive crawl with JavaScript support
-            print(f"Starting recursive crawl of {url} with max_depth={max_depth}")
+            # For regular URLs, use recursive crawl
             crawl_results = await crawl_recursive_internal_links(crawler, [url], max_depth=max_depth, max_concurrent=max_concurrent)
             crawl_type = "webpage"
-            print(f"Recursive crawl completed. Found {len(crawl_results)} pages.")
         
         if not crawl_results:
             return json.dumps({
@@ -536,9 +522,12 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
             url_to_full_document[doc['url']] = doc['markdown']
         
         # Update source information for each unique source FIRST (before inserting documents)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            source_summary_args = [(source_id, content) for source_id, content in source_content_map.items()]
-            source_summaries = list(executor.map(lambda args: extract_source_summary(args[0], args[1]), source_summary_args))
+        source_summary_args = [(source_id, content) for source_id, content in source_content_map.items()]
+        
+        # Generate source summaries in parallel using asyncio
+        source_summaries = await asyncio.gather(*[
+            extract_source_summary(args[0], args[1]) for args in source_summary_args
+        ])
         
         for (source_id, _), summary in zip(source_summary_args, source_summaries):
             word_count = source_word_counts.get(source_id, 0)
@@ -546,11 +535,12 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
         
         # Add documentation chunks to Supabase (AFTER sources exist)
         batch_size = 20
-        add_documents_to_supabase(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=batch_size)
+        await add_documents_to_supabase(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=batch_size)
         
         # Extract and process code examples from all documents only if enabled
         extract_code_examples_enabled = os.getenv("USE_AGENTIC_RAG", "false") == "true"
         if extract_code_examples_enabled:
+            all_code_blocks = []
             code_urls = []
             code_chunk_numbers = []
             code_examples = []
@@ -564,14 +554,14 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
                 code_blocks = extract_code_blocks(md)
                 
                 if code_blocks:
-                    # Process code examples in parallel (reduced workers to avoid rate limits)
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-                        # Prepare arguments for parallel processing
-                        summary_args = [(block['code'], block['context_before'], block['context_after']) 
-                                        for block in code_blocks]
-                        
-                        # Generate summaries in parallel
-                        summaries = list(executor.map(process_code_example, summary_args))
+                    # Process code examples in parallel with asyncio
+                    summary_args = [(block['code'], block['context_before'], block['context_after']) 
+                                    for block in code_blocks]
+                    
+                    # Generate summaries in parallel using asyncio
+                    summaries = await asyncio.gather(*[
+                        process_code_example(args) for args in summary_args
+                    ])
                     
                     # Prepare code example data
                     parsed_url = urlparse(source_url)
@@ -595,7 +585,7 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
             
             # Add all code examples to Supabase
             if code_examples:
-                add_code_examples_to_supabase(
+                await add_code_examples_to_supabase(
                     supabase_client, 
                     code_urls, 
                     code_chunk_numbers, 
@@ -859,7 +849,7 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
             from utils import search_code_examples as search_code_examples_impl
             
             # 1. Get vector search results (get more to account for filtering)
-            vector_results = search_code_examples_impl(
+            vector_results = await search_code_examples_impl(
                 client=supabase_client,
                 query=query,
                 match_count=match_count * 2,  # Get double to have room for filtering
@@ -925,7 +915,7 @@ async def search_code_examples(ctx: Context, query: str, source_id: str = None, 
             # Standard vector search only
             from utils import search_code_examples as search_code_examples_impl
             
-            results = search_code_examples_impl(
+            results = await search_code_examples_impl(
                 client=supabase_client,
                 query=query,
                 match_count=match_count,
@@ -1024,26 +1014,7 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
     Returns:
         List of dictionaries with URL and markdown content
     """
-    # Enhanced configuration for JavaScript-heavy sites
-    run_config = CrawlerRunConfig(
-        cache_mode=CacheMode.BYPASS, 
-        stream=False,
-        # JavaScript handling for dynamic content
-        wait_for="js:() => document.readyState === 'complete'",
-        page_timeout=60000,  # 60 seconds timeout for JS-heavy pages
-        delay_before_return_html=2.0,  # Wait 2 seconds after page load
-        # Image handling for better performance
-        wait_for_images=False,  # Don't wait for images unless needed
-        exclude_external_images=True,  # Skip external images
-        # Enable JavaScript execution
-        js_code="""
-        // Scroll to trigger lazy loading
-        window.scrollTo(0, document.body.scrollHeight);
-        // Wait a bit for dynamic content
-        await new Promise(r => setTimeout(r, 1000));
-        """
-    )
-    
+    run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
     dispatcher = MemoryAdaptiveDispatcher(
         memory_threshold_percent=70.0,
         check_interval=1.0,
@@ -1053,31 +1024,16 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
     visited = set()
 
     def normalize_url(url):
-        """Remove fragments and normalize URLs"""
-        return urldefrag(url)[0].rstrip('/')
-
-    # Extract base path from the first start URL to use as strict prefix filter
-    base_path_prefix = None
-    if start_urls:
-        parsed = urlparse(start_urls[0])
-        # Use the full path as the prefix for filtering
-        base_path = parsed.path.rstrip('/')
-        base_path_prefix = f"{parsed.scheme}://{parsed.netloc}{base_path}"
-        
-        # For root paths, ensure we don't accidentally include everything
-        if base_path == '':
-            base_path_prefix = f"{parsed.scheme}://{parsed.netloc}"
+        return urldefrag(url)[0]
 
     current_urls = set([normalize_url(u) for u in start_urls])
     results_all = []
 
     for depth in range(max_depth):
-        urls_to_crawl = [url for url in current_urls if url not in visited]
+        urls_to_crawl = [normalize_url(url) for url in current_urls if normalize_url(url) not in visited]
         if not urls_to_crawl:
             break
 
-        print(f"Crawling depth {depth + 1}/{max_depth} with {len(urls_to_crawl)} URLs...")
-        
         results = await crawler.arun_many(urls=urls_to_crawl, config=run_config, dispatcher=dispatcher)
         next_level_urls = set()
 
@@ -1087,52 +1043,12 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
 
             if result.success and result.markdown:
                 results_all.append({'url': result.url, 'markdown': result.markdown})
-                
-                # Process both internal and external links but filter based on path
-                all_links = []
-                all_links.extend(result.links.get("internal", []))
-                # Also check external links in case they're misclassified
-                all_links.extend(result.links.get("external", []))
-                
-                for link in all_links:
-                    if 'href' not in link:
-                        continue
-                        
+                for link in result.links.get("internal", []):
                     next_url = normalize_url(link["href"])
-                    
-                    # Skip if already visited
-                    if next_url in visited:
-                        continue
-                    
-                    # Parse the URL to check domain and path
-                    try:
-                        next_parsed = urlparse(next_url)
-                        base_parsed = urlparse(base_path_prefix)
-                        
-                        # Must be same domain
-                        if next_parsed.netloc != base_parsed.netloc:
-                            continue
-                        
-                        # Check path boundary - the most important part
-                        # The next URL's path must start with the base path
-                        next_path = next_parsed.path.rstrip('/')
-                        base_path = base_parsed.path.rstrip('/')
-                        
-                        # Special case for root paths
-                        if base_path == '':
-                            # If base is root, accept all paths on the domain
-                            next_level_urls.add(next_url)
-                        elif next_path == base_path or next_path.startswith(base_path + '/'):
-                            # Path matches exactly or is a subpath
-                            next_level_urls.add(next_url)
-                        # else: URL is outside our path boundary, skip it
-                        
-                    except Exception as e:
-                        print(f"Error parsing URL {next_url}: {e}")
-                        continue
+                    if next_url not in visited:
+                        next_level_urls.add(next_url)
 
         current_urls = next_level_urls
-        print(f"Found {len(current_urls)} URLs for next depth")
 
     return results_all
 
