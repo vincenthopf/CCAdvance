@@ -8,7 +8,6 @@
   *Intelligent documentation indexing and retrieval for AI-powered development*
 </div>
 
-# Note: CCAdvance is under VERY active development. Expect breaking changes.
 ## Overview
 
 CCAdvance is a Model Context Protocol (MCP) server designed specifically for Claude Code users who need advanced web crawling and RAG capabilities. It enables Claude Code to intelligently crawl documentation sites, extract code examples, and provide contextual search across indexed content.
